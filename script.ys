@@ -1,0 +1,34 @@
+plugin -i /home/robin/.nix-profile/share/yosys/plugins/ghdl.so
+# plugin -i /home/robin/.nix-profile/share/yosys/plugins/systemverilog.so
+
+!python -m router.autowrap 'router.memory_mapped_router.MemoryMappedRouter()' > gen/memory_mapped_router.sv
+!python -m router.export_config sv 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.sv
+!python -m router.export_config vhdl 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.vhdl
+!python -m router.gen_types 'router.memory_mapped_router.Flit' > gen/flit.cpp
+!python -m router.gen_translators 'router.memory_mapped_router.Flit' > gen/translators.py
+
+connect_rpc -exec python /data/projects/amaranth/amaranth-rpc yosys router.memory_mapped_router.MemoryMappedRouter
+
+ghdl -Wno-pure -Wno-hide --std=08 -frelaxed  -fsynopsys \
+  gen/memory_mapped_router_pkg.vhdl \
+  lib-vhdl-utils/units/sram/source/rtl/buf_infer.vhd \
+  lib-vhdl-utils/pkg/util_arr_pkg.vhd lib-vhdl-utils/pkg/util_pkg.vhd \
+  lib-vhdl-utils/units/arq/source/rtl/arq_target.vhd \
+  hicann-dls-private/hicann-dls/units/hx_l2/source/hdl/rtl/arq_wrap.vhd \
+  lib-vhdl-utils/units/tinyarq/source/rtl/multiwidth_tinyarq.vhd \
+  lib-vhdl-utils/units/tinyarq/source/rtl/arq_delay.vhd \
+  lib-vhdl-utils/units/arq/source/rtl/arq_master.vhd -e
+
+!sv2v -E always -E assert -E logic -E unbasedunsized gen/memory_mapped_router.sv gen/memory_mapped_router_pkg.sv top.sv > gen/top.v
+read_verilog -sv gen/top.v
+
+hierarchy -top top
+
+setattr -set input_port 1 i:*
+setattr -set output_port 1 o:*
+
+write_verilog -sv gen/merged.sv
+# write_ilang /tmp/test.il
+
+# show \router.memory_mapped_router.MemoryMappedRouter
+write_cxxrtl -header gen/router_top.cpp

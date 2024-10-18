@@ -1,0 +1,13 @@
+.DS_Store
+.idea
+*.log
+tmp/
+
+
+hicann-dls-private/
+hxfpga/
+lib-vhdl-utils/
+router
+sim
+surfer.ron
+visionary-rtl-utils/
