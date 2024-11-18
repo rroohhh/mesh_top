@@ -13,6 +13,9 @@ package fatmeshy_pkg;
 		EVENT,
 		CONFIG
 	} link_data_type;
+
+	parameter	 CREDIT_WIDTH = SEQ_WIDTH;
+	typedef logic [CREDIT_WIDTH -1 : 0]	credit_t;
 endpackage
 
 // this ignores gearbox, etc
@@ -105,13 +108,13 @@ module top(
 	assign tx_link_data_east = tx_link_data[EAST];
 	assign tx_link_data_west = tx_link_data[WEST];
 
-	wire [fatmeshy_pkg::LINK_WORD_SIZE - 1 : 0] tx_link_valid[4];
+	wire tx_link_valid[4];
 	assign tx_link_valid_north = tx_link_valid[NORTH];
 	assign tx_link_valid_south = tx_link_valid[SOUTH];
 	assign tx_link_valid_east = tx_link_valid[EAST];
 	assign tx_link_valid_west = tx_link_valid[WEST];
 
-	wire [fatmeshy_pkg::LINK_WORD_SIZE - 1 : 0] tx_prio[4];
+	wire tx_prio[4];
 	assign tx_prio_north = tx_prio[NORTH];
 	assign tx_prio_south = tx_prio[SOUTH];
 	assign tx_prio_east = tx_prio[EAST];
@@ -146,6 +149,7 @@ module top(
 	);
 
 	for (genvar port_idx = 0; port_idx < LOCAL; port_idx++) begin
+		// TODO(robin):	extract this into a module <-> arq packing / unpacking
 		flit rx_unpacked_flit;
 		assign rx_unpacked_flit = rx_link_data[port_idx][fatmeshy_pkg::SEQ_WIDTH +: $bits(flit)];
 		flit_tag rx_flit_tag;
@@ -163,6 +167,8 @@ module top(
 
 		assign tx_link_data[port_idx][fatmeshy_pkg::SEQ_WIDTH +: $bits(flit)] = tx_packed_flit_tag_fixed;
 		assign tx_link_data[port_idx][0 +: fatmeshy_pkg::SEQ_WIDTH] = tx_data[0 +: fatmeshy_pkg::SEQ_WIDTH];
+
+		// credit_counter credit
 
 		arq_wrap arq (
 			.clock(clk),
@@ -193,3 +199,26 @@ module top(
 		);
 	end
 endmodule
+
+module credit_counter(
+	input wire clk, rst,
+	input fatmeshy_pkg::credit_t credit_in,
+	input wire credit_valid,
+	input tx_valid,
+	output tx_accept
+);
+	fatmeshy_pkg::credit_t credit_amount;
+	always_ff @(posedge clk) begin
+		if (rst) begin
+			credit_amount <= 0;
+		end else begin
+			if (credit_valid) begin
+				credit_amount <= credit_in - (tx_accept & tx_valid);
+			end else begin
+				credit_amount <= credit_amount - (tx_accept & tx_valid);
+			end
+		end
+	end
+
+	assign tx_accept = (credit_amount > 0) & tx_valid;
+endmodule // credit_counter

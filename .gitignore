@@ -4,6 +4,8 @@
 tmp/
 
 
+out.fst
+sim.o
 hicann-dls-private/
 hxfpga/
 lib-vhdl-utils/
@@ -11,3 +13,8 @@ router
 sim
 surfer.ron
 visionary-rtl-utils/
+perf.data*
+*.fst
+*.vcd
+*.fst.hier
+flamegraph.svg

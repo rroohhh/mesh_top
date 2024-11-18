@@ -1,0 +1,15 @@
+synopsys: hicann-dls-private/hicann-dls/units/hx_l2/source/hdl/rtl/buf_infer_asic.vhd
+# yosys: hicann-dls-private/hicann-dls/units/hx_l2/source/hdl/rtl/buf_infer_asic.vhd
+yosys: lib-vhdl-utils/units/sram/source/rtl/buf_infer.vhd
+lib-vhdl-utils/pkg/util_arr_pkg.vhd
+lib-vhdl-utils/pkg/util_pkg.vhd
+lib-vhdl-utils/units/arq/source/rtl/arq_target.vhd
+hicann-dls-private/hicann-dls/units/hx_l2/source/hdl/rtl/arq_wrap.vhd
+lib-vhdl-utils/units/tinyarq/source/rtl/multiwidth_tinyarq.vhd
+lib-vhdl-utils/units/tinyarq/source/rtl/arq_delay.vhd
+lib-vhdl-utils/units/arq/source/rtl/arq_master.vhd
+gen/memory_mapped_router.sv
+gen/memory_mapped_router_pkg.sv
+gen/memory_mapped_router_pkg.vhdl
+synopsys: gen/memory_mapped_router_impl.sv
+top.sv
