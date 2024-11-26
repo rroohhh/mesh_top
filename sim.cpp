@@ -1,3 +1,4 @@
+#include <boost/program_options.hpp>
 #include "mesh.cpp"
 #include <print>
 
@@ -109,39 +110,47 @@ auto payload_from_int(IntT v) {
     return res.bit_or(as_value.template zcast<res_type::bits>());
 }
 
+
 class TraceFPGABandwidth {
     NodeInfo i;
-    int      sent_flits  = 0;
-    int      packet_len  = 3;
-    int      target_rate = 2 * 1000;
-    int      fpga_rate   = 8 * 1000;
-    int      port_rate   = 20 * 1000;
-    float    clock_rate  = port_rate / memory_mapped_router_config::FLIT_SIZE;
-    int      sent        = 0;
-    int      to_send     = 0;
-    bool     is_fpga;
-    int      fpga_ticks = 0;
+public:
+  using Params = TraceFPGABandwidthParams;
+private:
+    Params params;
+
+    // state
+    uint32_t      sent_flits  = 0;
+    uint32_t      sent        = 0;
+    uint32_t      to_send     = 0;
+    bool          is_fpga;
 
     TrafficVerification traffic_gen;
+
+  // shared ptr to have stable address for fst_writer
+    std::unique_ptr<value<32>> flit_latency = std::make_unique<value<32>>();
+    std::unique_ptr<value<32>> flits_received = std::make_unique<value<32>>();
+    std::unique_ptr<value<32>> flits_sent = std::make_unique<value<32>>();
+    std::unique_ptr<value<32>> packets_sent = std::make_unique<value<32>>();
+    std::unique_ptr<value<32>> packets_to_send = std::make_unique<value<32>>();
 public:
     // lfsr cannot be started with 0
-    TraceFPGABandwidth(const NodeInfo & node_info) : i(node_info), traffic_gen({.x = i.x, .y = i.y}) {
-        is_fpga = (i.y == 0);
-        fstWriterSetComment(fst_ctx, node_role_attr({.is_fpga = is_fpga, .e = e, .p = p, traffic}).c_str());
+    TraceFPGABandwidth(const NodeInfo & node_info, const Params & params) : i(node_info), params(params), is_fpga(i.y == 0), traffic_gen({.x = i.x, .y = i.y}) {
+        fstWriterSetComment(i.fst_ctx, node_role_attr({.is_fpga = is_fpga}).c_str());
+        i.fst_writer.add(i.hier_prefix + "flit_latency", *flit_latency, {});
+        i.fst_writer.add(i.hier_prefix + "flits_received", *flits_received, {});
+        i.fst_writer.add(i.hier_prefix + "flits_sent", *flits_sent, {});
+        i.fst_writer.add(i.hier_prefix + "packets_sent", *packets_sent, {});
+        i.fst_writer.add(i.hier_prefix + "packets_to_send", *packets_to_send, {});
     }
 
     bool step() {
         if(is_fpga) {
-            if(i.timestamp >= clock_rate * fpga_ticks * memory_mapped_router_config::FLIT_SIZE / fpga_rate) {
-                fpga_ticks++;
-                i.node.p_out__ready.set(1);
-            } else {
-                i.node.p_out__ready.set(0);
-            }
+            // assume infinite FPGA bandwidth
+            i.node.p_out__ready.set(1);
 
             if(i.node.p_out__valid and i.node.p_out__ready) {
+                flits_received->set(flits_received->get<uint32_t>() + 1);
                 auto decoded = flit::decode(i.node.p_out__flit);
-                    // std::println("[{}, {}]@0x{:x}: {:#016x}", i.x, i.y, i.timestamp, flit_payload{}.payload);
                 uint64_t payload = std::visit([](auto v){
                     if constexpr (is_value<decltype(v.payload)>::value) {
                         // TODO(robin): can we replace this hardcoded 64 anytime?
@@ -155,6 +164,7 @@ public:
                 u8 y = (payload >> 16) & 0xFF;
                 payload = payload & 0xFFFF;
 
+                flit_latency->set(i.timestamp - timestamp);
                 // std::println("[{}, {}]@{: 6}: got [{}, {}]@{: 6} {:#06x}", i.x, i.y, i.timestamp, x, y, timestamp, payload);
                 if (not traffic_gen.receive_from(coordinate{.x = x, .y = y}, payload)) {
                     std::println("mismatch");
@@ -163,56 +173,88 @@ public:
                 // std::println("{:#16x}", payload);
             }
         } else {
-            // first packet flit is overhead
-            to_send = i.timestamp * target_rate / port_rate / (packet_len - 1);
+            // non poissonian to emulate constant ADC sampling
+            to_send = i.timestamp * params.p;
+            if((sent < to_send) && sent_flits == 0) { sent_flits = params.packet_len; }
 
-            if((sent < to_send) && sent_flits == 0) { sent_flits = packet_len; }
-
-            // coordinate closest_fpga{.x = i.x, .y = (u8)(i.y >= (i.size_y / 2) ? i.size_y - 1 : 0)};
             coordinate closest_fpga{.x = i.x, .y = 0};
-
             uint64_t payload = ((uint64_t)i.timestamp << 32) | ((u32) i.x) << 24 | ((u32) i.y) << 16 | traffic_gen.send_to_peek(closest_fpga);
-            if(packet_len == 1) {
+            if(params.packet_len == 1) {
                 i.node.p_in__flit =
                     flit{flit_start_and_end{.target = closest_fpga, .payload{payload_from_int<flit_start_and_end>(payload)}}};
-            }
-
-            if(sent_flits == packet_len) {
-                i.node.p_in__flit =
-                    flit{flit_start{.target = closest_fpga, .payload{payload_from_int<flit_start>(payload)}}};
-            } else if(sent_flits > 1) {
-                i.node.p_in__flit = flit{flit_payload{payload_from_int<flit_payload>(payload)}};
-            } else if(sent_flits == 1) {
-                i.node.p_in__flit = flit{flit_tail{payload_from_int<flit_tail>(payload)}};
             } else {
-                i.node.p_in__flit = flit{flit_start{}};
+                if(sent_flits == params.packet_len) {
+                    i.node.p_in__flit =
+                        flit{flit_start{.target = closest_fpga, .payload{payload_from_int<flit_start>(payload)}}};
+                } else if(sent_flits > 1) {
+                    i.node.p_in__flit = flit{flit_payload{payload_from_int<flit_payload>(payload)}};
+                } else if(sent_flits == 1) {
+                    i.node.p_in__flit = flit{flit_tail{payload_from_int<flit_tail>(payload)}};
+                } else {
+                    i.node.p_in__flit = flit{flit_start{}};
+                }
             }
 
             i.node.p_in__valid.set(sent_flits != 0);
 
             if(i.node.p_in__ready and i.node.p_in__valid) {
+                flits_sent->set(flits_sent->get<uint32_t>() + 1);
+
                 sent_flits--;
                 traffic_gen.send_to_pop(closest_fpga);
 
                 if(sent_flits == 0) { sent++; }
             }
 
+            // std::println("[{},{}] sent {}, to_send {}", i.x, i.y, sent, to_send);
+            packets_sent->set(sent);
+            packets_to_send->set(to_send);
+
+
         }
         return false;
     }
 };
 
-int main() {
-    const auto RNG_SEED = 1230;
-    auto mesh = Mesh<cxxrtl_design::p_top, TraceFPGABandwidth, PoissonEventTraffic>(3, 3, true, 5, 1, RNG_SEED, 0.9);
+namespace po = boost::program_options;
+int main(int ac, char ** av) {
+    po::options_description desc("Allowed options");
+    double e, p;
+    uint64_t rng_seed;
+    uint32_t width, height;
+    std::string filename;
+    uint32_t steps;
+    uint32_t packet_len;
+
+    // TODO(robin): configure link latency
+    desc.add_options()
+        ("help", "produce help message")
+        ("event_rate", po::value<double>(&e)->required(), "event rate")
+        ("config_rate", po::value<double>(&p)->required(), "config rate")
+        ("rng_seed", po::value<uint64_t>(&rng_seed)->required(), "rng seed")
+        ("width", po::value<uint32_t>(&width)->required(), "mesh width")
+        ("height", po::value<uint32_t>(&height)->required(), "mesh height")
+        ("out", po::value<std::string>(&filename)->required(), "out filename")
+        ("packet_len", po::value<uint32_t>(&packet_len)->required(), "number of flits per packet")
+        ("steps", po::value<uint32_t>(&steps)->required(), "number of steps")
+    ;
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(ac, av, desc), vm);
+    po::notify(vm);
+
+
+    std::println("height {}, width {}", height, width);
+
+    auto mesh = Mesh<cxxrtl_design::p_top, TraceFPGABandwidth, PoissonEventTraffic>(filename, height, width, true, 5, 1, rng_seed, {.e = e}, {.packet_len = packet_len, .p = p});
     // auto mesh = Mesh<TraceFPGABandwidth>(3, true, 5, 1);
 
-    for(size_t i = 0; i < 10'000; i++) {
+    for(size_t i = 0; i < steps; i++) {
         ZoneScopedN("main_step");
         if(mesh.step()) {
             break;
         }
-        if(i % 100 == 0) { std::println("step {}", i); }
+        if(i % 1000 == 0) { std::println("step {}", i); }
     }
 
     return 0;

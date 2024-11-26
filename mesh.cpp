@@ -8,7 +8,7 @@
 #include <tracy/Tracy.hpp>
 #include <random>
 #include "memory_mapped_router_pkg.cpp"
-#include "mesh_utils.cpp"
+#include "mesh_utils.h"
 
 struct bar_t {
     unsigned const        count;
@@ -118,15 +118,14 @@ class PoissonEventTraffic {
     std::discrete_distribution<int> dist;
 
 public:
-    using Params = double;
+    using Params = PoissonEventTrafficParams;
 
-    PoissonEventTraffic(uint64_t seed, Params rate) : rng(seed), dist({1.0 - rate, rate}) {}
+    PoissonEventTraffic(uint64_t seed, Params params) : rng(seed), dist({1.0 - params.e, params.e}) {}
 
     bool did_send() {
         return dist(rng) == 1;
     }
 };
-
 
 
 // this models a link connections, which is several parts
@@ -139,6 +138,7 @@ class LinkConnection {
     std::vector<LinkWord>   words;
     std::vector<LinkScalar> valids;
 
+    LinkWord gearbox_data[2];
     LinkWord & sender_data;
     LinkWord & receiver_data;
 
@@ -156,9 +156,12 @@ class LinkConnection {
 
     uint64_t link_words_to_send = 0;
 
+    std::unique_ptr<value<memory_mapped_router_config::MUX_COUNT>> event_sent = std::make_unique<value<memory_mapped_router_config::MUX_COUNT>>();
+    std::unique_ptr<value<memory_mapped_router_config::MUX_COUNT>> data_sent = std::make_unique<value<memory_mapped_router_config::MUX_COUNT>>();
+
     static constexpr auto MUX_COUNT = memory_mapped_router_config::MUX_COUNT;
 public:
-    LinkConnection(uint64_t rng_seed, EventTrafficModel::Params params, LinkWord & sender_data, LinkScalar & sender_valid, LinkScalar & sender_accept,
+    LinkConnection(std::string hier_prefix, cxxrtl::fst_writer & fst_writer, uint64_t rng_seed, EventTrafficModel::Params params, LinkWord & sender_data, LinkScalar & sender_valid, LinkScalar & sender_accept,
                    LinkScalar & sender_reject, LinkScalar & sender_prio, LinkWord & receiver_data,
                    LinkScalar & receiver_valid, unsigned delay, float error_rate)
         : sender_data(sender_data), receiver_data(receiver_data), sender_valid(sender_valid),
@@ -171,46 +174,86 @@ public:
         reader = 0;
         writer = delay - 1;
 
+        fst_writer.add(hier_prefix + " event_sent", *event_sent, {});
+        fst_writer.add(hier_prefix + " data_sent", *data_sent, {});
         // TODO(robin): model error rate maybe
     }
 
     void step() {
-        bool accept = link_words_to_send == 0;
+        // NOTE(robin): this store MUX_COUNT + MUX_COUNT - 1 words
+        // if we had for example link_words_to_send == 1 and on the next cycle we can get rid of MUX_COUNT we would underutilize the link
+        // because we only have one link word to send
+        // so try to always have link_words_to_send >= MUX_COUNT
+        bool accept = link_words_to_send < MUX_COUNT - 1;
         sender_accept.set(accept);
         if (sender_valid and accept) {
+            if (link_words_to_send != 0) {
+                gearbox_data[1] = sender_data;
+            } else {
+                gearbox_data[0] = sender_data;
+            }
+
             link_words_to_send += MUX_COUNT;
         }
+        bool send_gearbox_data = false;
+        bool shift_gearbox = false;
+        uint8_t events_sent = 0;
+        uint8_t link_words_sent = 0;
         for (int i = 0; i < MUX_COUNT; i++) {
             if (not event_traffic_model.did_send()) {
                 if (link_words_to_send > 0) {
+                    link_words_sent |= 1 << i;
                     link_words_to_send -= 1;
+
+                    if (link_words_to_send % MUX_COUNT == 0) {
+                        send_gearbox_data = true;
+                        shift_gearbox = link_words_to_send == MUX_COUNT;
+                    }
                 }
+            } else {
+                events_sent |= 1 << i;
             }
         }
+        // std::println("linkword: {}", linkword);
+
+        event_sent->set(events_sent);
+        data_sent->set(link_words_sent);
 
         // sender_reject.set(0);
-
-        words[writer]  = sender_data;
-        valids[writer] = sender_valid.bit_and(value<1>{accept});
+        if (send_gearbox_data) {
+            words[writer]  = gearbox_data[0];
+            valids[writer] = value<1>{send_gearbox_data};
+        } else {
+            words[writer]  = {};
+            valids[writer] = {};
+        }
 
         receiver_data  = words[reader];
         receiver_valid = valids[reader];
 
         reader = (reader + 1) % words.size();
         writer = (writer + 1) % words.size();
+
+        if (shift_gearbox) {
+            gearbox_data[0] = gearbox_data[1];
+        }
     }
 };
 
 struct NodeInfo {
     cxxrtl_design::p_top & node;
+    // SAFETY: only valid to use in constructor atm
+    cxxrtl::fstCtx fst_ctx;
+    cxxrtl::fst_writer & fst_writer;
+    std::string hier_prefix;
     uint64_t &             timestamp;
     u8                     x, y;
     u8                     size_x, size_y;
 };
 
 template <class T>
-concept NodeObserverC = requires(T a, const NodeInfo & info) {
-    { T(info) };
+concept NodeObserverC = requires(T a, const NodeInfo & info, const T::Params & params) {
+    { T(info, params) };
     { a.step() };
 };
 
@@ -223,6 +266,7 @@ class Mesh {
 
     Node * nodes;
     EventTrafficModel::Params event_model_params;
+    Obs::Params node_params;
 
     std::vector<size_t> node_indices;
 
@@ -267,15 +311,48 @@ class Mesh {
 
             if (sample) {
                 for(int i = base_node; i < end_node; i++) {
-                    auto node = node_indices[i];
-                    u8 x = node / width;
-                    u8 y = node % width;
-                    nodes[node].d.debug_info(&debug_items[i - base_node], nullptr, "node[" + std::to_string(x) + "][" + std::to_string(y) + "] ");
+                    auto node_idx = node_indices[i];
+                    u8 x = node_idx / width;
+                    u8 y = node_idx % width;
+                    auto & node = nodes[x * width + y];
+                    std::string prefix = "node[" + std::to_string(x) + "][" + std::to_string(y) + "] ";
+                    node.d.debug_info(&debug_items[i - base_node], nullptr, prefix);
                     {
                         auto lock = std::lock_guard{worker_lock};
                         // TODO(robin): rather crude hack to separate fst_writer and mesh
                         fstWriterSetComment(fst_ctx, node_attr({.x = x, .y = y}).c_str());
-                        node_observers.emplace_back(NodeInfo{nodes[x * width + y].d, steps, x, y, (u8)height, (u8)width});
+                        node_observers.emplace_back(NodeInfo{nodes[x * width + y].d, fst_ctx, fst_writer, prefix, steps, x, y, (u8)height, (u8)width}, node_params);
+
+                        node.d.p_route__computer__position = coordinate{.x = x, .y = y};
+                        if(x > 0) {
+                            links.emplace_back(prefix + "west", fst_writer, splitmix64(node.rng_seed), event_model_params,
+                                nodes[x * width + y].d.p_tx__link__data__west, nodes[x * width + y].d.p_tx__link__valid__west,
+                                nodes[x * width + y].d.p_tx__accept__west, nodes[x * width + y].d.p_tx__reject__west,
+                                nodes[x * width + y].d.p_tx__prio__west, nodes[(x - 1) * width + y].d.p_rx__link__data__east,
+                                nodes[(x - 1) * width + y].d.p_rx__link__valid__east, link_delay, error_rate);
+                        }
+                        if(x < (height - 1)) {
+                            links.emplace_back(prefix + "east", fst_writer, splitmix64(node.rng_seed), event_model_params,
+                                nodes[x * width + y].d.p_tx__link__data__east, nodes[x * width + y].d.p_tx__link__valid__east,
+                                nodes[x * width + y].d.p_tx__accept__east, nodes[x * width + y].d.p_tx__reject__east,
+                                nodes[x * width + y].d.p_tx__prio__east, nodes[(x + 1) * width + y].d.p_rx__link__data__west,
+                                nodes[(x + 1) * width + y].d.p_rx__link__valid__west, link_delay, error_rate);
+                        }
+                        if(y > 0) {
+                            links.emplace_back(prefix + "north", fst_writer, splitmix64(node.rng_seed), event_model_params,
+                                nodes[x * width + y].d.p_tx__link__data__north, nodes[x * width + y].d.p_tx__link__valid__north,
+                                nodes[x * width + y].d.p_tx__accept__north, nodes[x * width + y].d.p_tx__reject__north,
+                                nodes[x * width + y].d.p_tx__prio__north, nodes[x * width + y - 1].d.p_rx__link__data__south,
+                                nodes[x * width + y - 1].d.p_rx__link__valid__south, link_delay, error_rate);
+                        }
+                        if(y < (width - 1)) {
+                            links.emplace_back(prefix + "south", fst_writer, splitmix64(node.rng_seed), event_model_params,
+                                nodes[x * width + y].d.p_tx__link__data__south, nodes[x * width + y].d.p_tx__link__valid__south,
+                                nodes[x * width + y].d.p_tx__accept__south, nodes[x * width + y].d.p_tx__reject__south,
+                                nodes[x * width + y].d.p_tx__prio__south, nodes[x * width + y + 1].d.p_rx__link__data__north,
+                                nodes[x * width + y + 1].d.p_rx__link__valid__north, link_delay, error_rate);
+                        }
+
                         fst_writer.add_without_memories(debug_items[i - base_node]);
                     }
                 }
@@ -312,46 +389,17 @@ class Mesh {
                 }
             }
 
-            for(u8 n = base_node; n < end_node; n++) {
-                auto node_idx = node_indices[n];
-                u8 x = node_idx / width;
-                u8 y = node_idx % width;
+            // for(u8 n = base_node; n < end_node; n++) {
+            //     auto lock = std::lock_guard{worker_lock};
 
-                auto & node = nodes[x * width + y];
-                node.d.p_route__computer__position = coordinate{.x = x, .y = y};
-                if (not sample) {
-                    node_observers.emplace_back(NodeInfo{nodes[x * width + y].d, steps, x, y, (u8)height, (u8)width});
-                }
+            //     auto node_idx = node_indices[n];
+            //     u8 x = node_idx / width;
+            //     u8 y = node_idx % width;
 
-                if(x > 0) {
-                    links.emplace_back(splitmix64(node.rng_seed), event_model_params,
-                        nodes[x * width + y].d.p_tx__link__data__west, nodes[x * width + y].d.p_tx__link__valid__west,
-                        nodes[x * width + y].d.p_tx__accept__west, nodes[x * width + y].d.p_tx__reject__west,
-                        nodes[x * width + y].d.p_tx__prio__west, nodes[(x - 1) * width + y].d.p_rx__link__data__east,
-                        nodes[(x - 1) * width + y].d.p_rx__link__valid__east, link_delay, error_rate);
-                }
-                if(x < (height - 1)) {
-                    links.emplace_back(splitmix64(node.rng_seed), event_model_params,
-                        nodes[x * width + y].d.p_tx__link__data__east, nodes[x * width + y].d.p_tx__link__valid__east,
-                        nodes[x * width + y].d.p_tx__accept__east, nodes[x * width + y].d.p_tx__reject__east,
-                        nodes[x * width + y].d.p_tx__prio__east, nodes[(x + 1) * width + y].d.p_rx__link__data__west,
-                        nodes[(x + 1) * width + y].d.p_rx__link__valid__west, link_delay, error_rate);
-                }
-                if(y > 0) {
-                    links.emplace_back(splitmix64(node.rng_seed), event_model_params,
-                        nodes[x * width + y].d.p_tx__link__data__north, nodes[x * width + y].d.p_tx__link__valid__north,
-                        nodes[x * width + y].d.p_tx__accept__north, nodes[x * width + y].d.p_tx__reject__north,
-                        nodes[x * width + y].d.p_tx__prio__north, nodes[x * width + y - 1].d.p_rx__link__data__south,
-                        nodes[x * width + y - 1].d.p_rx__link__valid__south, link_delay, error_rate);
-                }
-                if(y < (width - 1)) {
-                    links.emplace_back(splitmix64(node.rng_seed), event_model_params,
-                        nodes[x * width + y].d.p_tx__link__data__south, nodes[x * width + y].d.p_tx__link__valid__south,
-                        nodes[x * width + y].d.p_tx__accept__south, nodes[x * width + y].d.p_tx__reject__south,
-                        nodes[x * width + y].d.p_tx__prio__south, nodes[x * width + y + 1].d.p_rx__link__data__north,
-                        nodes[x * width + y + 1].d.p_rx__link__valid__north, link_delay, error_rate);
-                }
-            }
+            //     std::string prefix = "node[" + std::to_string(x) + "][" + std::to_string(y) + "] ";
+
+            //     auto & node = nodes[x * width + y];
+            // }
         }
 
         // wait for everybody to be done
@@ -445,8 +493,8 @@ public:
 
         fstWriterClose(fst_ctx);
     }
-    Mesh(u8 width, u8 height, bool sample, unsigned link_delay, size_t num_workers, uint64_t rng_seed, EventTrafficModel::Params event_model_params)
-        : event_model_params(event_model_params), width(width), height(height), num_workers(num_workers), link_delay(link_delay), error_rate(0.0), sample(sample), worker_sync_point{num_workers + 1, [&]() {
+    Mesh(std::string filename, u8 width, u8 height, bool sample, unsigned link_delay, size_t num_workers, uint64_t rng_seed, EventTrafficModel::Params event_model_params, Obs::Params node_params)
+        : event_model_params(event_model_params), node_params(node_params), width(width), height(height), num_workers(num_workers), link_delay(link_delay), error_rate(0.0), sample(sample), worker_sync_point{num_workers + 1, [&]() {
             if (this->sample) {
                 cxxrtl::fst_writer fst_writer{fst_ctx, &fst_ctx_mutex};
 
@@ -483,11 +531,19 @@ public:
         std::mt19937 g(rd());
         std::shuffle(node_indices.begin(), node_indices.end(), g);
 
-        fst_ctx = fstWriterCreate("out.fst", 0);
+        // compressed hier breaks reader somehow
+        fst_ctx = fstWriterCreate(filename.c_str(), 0 /* compressed hier */);
         fstWriterSetParallelMode(fst_ctx, true);
         fstWriterSetPackType(fst_ctx, FST_WR_PT_LZ4);
-        fstWriterSetComment(fst_ctx, system_attr({.rng_seed = rng_seed}).c_str());
-        // fstWriterSetRepackOnClose(fst_ctx, 1);
+        fstWriterSetComment(fst_ctx, system_attr(SystemAttr<Obs, EventTrafficModel>{
+                    .rng_seed = rng_seed,
+                    .width = width, .height = height,
+                    .link_delay = link_delay,
+                    .node_params = node_params,
+                    .event_params = event_model_params
+                }).c_str());
+
+        fstWriterSetRepackOnClose(fst_ctx, 1);
 
         // std::println("{}", node_indices);
         for(size_t worker = 0; worker < num_workers; worker++) { workers.emplace_back(&Mesh::work, this, worker); }
