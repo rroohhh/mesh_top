@@ -149,6 +149,7 @@ module top(
 	);
 
 	for (genvar port_idx = 0; port_idx < LOCAL; port_idx++) begin
+	// for (genvar port_idx = 0; port_idx < LOCAL; port_idx++) begin
 		// TODO(robin):	extract this into a module <-> arq packing / unpacking
 		flit rx_unpacked_flit;
 		assign rx_unpacked_flit = rx_link_data[port_idx][fatmeshy_pkg::SEQ_WIDTH +: $bits(flit)];

@@ -2,6 +2,7 @@
 #include <variant>
 #include <vector>
 #include <thread>
+#include <barrier>
 #include <atomic>
 #include <cinttypes>
 #include <print>
@@ -186,6 +187,7 @@ public:
         // so try to always have link_words_to_send >= MUX_COUNT
         bool accept = link_words_to_send < MUX_COUNT - 1;
         sender_accept.set(accept);
+        // while (!)
         if (sender_valid and accept) {
             if (link_words_to_send != 0) {
                 gearbox_data[1] = sender_data;
@@ -284,8 +286,8 @@ class Mesh {
     bool                sample = true;
 
     std::vector<std::thread> workers;
-    // std::barrier<> worker_sync_point;
-    bar_t worker_sync_point;
+    std::barrier<std::function<void()>> worker_sync_point;
+    // bar_t worker_sync_point;
 
     // TODO(robin): does this have to be a atomic? Probably not as the barrier as already a sync point
     std::atomic<bool> stop;
@@ -353,7 +355,18 @@ class Mesh {
                                 nodes[x * width + y + 1].d.p_rx__link__valid__north, link_delay, error_rate);
                         }
 
-                        fst_writer.add_without_memories(debug_items[i - base_node]);
+                        fst_writer.add(debug_items[i - base_node], [](const std::string & name, const debug_item &item) {
+                            // NOTE(robin): crude hack to avoid sampling this one
+                            // because they have comb cycles
+                            // size with:
+                            // 4.3M out.fst
+                            // 700k out.fst.hier
+                            // size without:
+                            // 1.9M out.fst
+                            // 1.3M out.fst.hier <- ???
+                            return not (name.ends_with("internal_bus") || (item.type == debug_item::MEMORY));
+                            return true;
+                        });
                     }
                 }
             }
@@ -381,11 +394,16 @@ class Mesh {
                 }
                 nodes[node].d.p_rst.set(false);
 
-                for(int i = 0; i < 64; i++) {
+                int LAST = 64;
+                for(int i = 0; i < LAST; i++) {
                     nodes[node].d.p_clk.set(false);
                     nodes[node].d.step();
                     nodes[node].d.p_clk.set(true);
                     nodes[node].d.step();
+                    if ((i + 1) == LAST) {
+                        // HACK(robin): this fixes https://github.com/YosysHQ/yosys/issues/2780
+                        nodes[node].d.step();
+                    }
                 }
             }
 
@@ -443,6 +461,9 @@ class Mesh {
                         auto node = node_indices[i];
                         nodes[node].d.p_clk.set(false);
                         nodes[node].d.step();
+                        // std::println("[{}] negedge", i);
+                        // std::println("{}", nodes[node].d.step());
+                        // std::println("{}", nodes[node].d.step());
                     }
 
 
@@ -459,7 +480,11 @@ class Mesh {
                     for(int i = base_node; i < end_node; i++) {
                         auto node = node_indices[i];
                         nodes[node].d.p_clk.set(true);
+                        // std::println("[{}] posedge", i);
                         nodes[node].d.step();
+                        // HACK(robin): this fixes https://github.com/YosysHQ/yosys/issues/2780
+                        nodes[node].d.step();
+                        // nodes[node].d.step();
                     }
 
                     if(sample) {
@@ -494,7 +519,7 @@ public:
         fstWriterClose(fst_ctx);
     }
     Mesh(std::string filename, u8 width, u8 height, bool sample, unsigned link_delay, size_t num_workers, uint64_t rng_seed, EventTrafficModel::Params event_model_params, Obs::Params node_params)
-        : event_model_params(event_model_params), node_params(node_params), width(width), height(height), num_workers(num_workers), link_delay(link_delay), error_rate(0.0), sample(sample), worker_sync_point{num_workers + 1, [&]() {
+        : event_model_params(event_model_params), node_params(node_params), width(width), height(height), num_workers(num_workers), link_delay(link_delay), error_rate(0.0), sample(sample), worker_sync_point{num_workers + 1, [&]() noexcept {
             if (this->sample) {
                 cxxrtl::fst_writer fst_writer{fst_ctx, &fst_ctx_mutex};
 
@@ -531,8 +556,9 @@ public:
         std::mt19937 g(rd());
         std::shuffle(node_indices.begin(), node_indices.end(), g);
 
-        // compressed hier breaks reader somehow
-        fst_ctx = fstWriterCreate(filename.c_str(), 0 /* compressed hier */);
+        fst_ctx = fstWriterCreate(filename.c_str(), 1 /* compressed hier */);
+
+        fstWriterSetDumpSizeLimit(fst_ctx, 1024 * 1024 * 64);
         fstWriterSetParallelMode(fst_ctx, true);
         fstWriterSetPackType(fst_ctx, FST_WR_PT_LZ4);
         fstWriterSetComment(fst_ctx, system_attr(SystemAttr<Obs, EventTrafficModel>{

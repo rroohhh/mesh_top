@@ -1,0 +1,9 @@
+break mesh.cpp:268
+      command 1
+      watch -l &(node_observers.__begin_ + 0).i.timestamp
+      watch -l &(node_observers.__begin_ + 1).i.timestamp
+      watch -l &(node_observers.__begin_ + 2).i.timestamp
+      del 1
+      continue
+end
+run

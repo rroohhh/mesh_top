@@ -24,17 +24,25 @@ write_verilog -sv gen/merged.sv
 write_verilog -selected -sv gen/memory_mapped_router_impl.sv
 cd
 
+# do checks on the input and output ports
+design -push-copy
+flatten
+proc
+splitnets -driver; clean -purge; splitnets -driver; clean -purge
+
+# comb feedback on ports is just shit
+#shell
+select -assert-none i:* %coe* o:* %cie* %i
+design -pop
+
 # flatten to extract debug items
 flatten
 expose a:debug_item
 
-# flatten -noscopeinfo
-# proc
-# clean
-# opt
-# clean
-# opt_clean
-# show -stretch top
+# split on drivers, this cleans up feedback cycles
+proc
+splitnets -driver; clean -purge; splitnets -driver; clean -purge
 
-# show \router.memory_mapped_router.MemoryMappedRouter
+#write_verilog /tmp/a.
+#-g2
 write_cxxrtl -g2 -header gen/router_top.cpp
