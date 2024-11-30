@@ -19,3 +19,5 @@ perf.data*
 *.fst.hier
 flamegraph.svg
 *.opt
+*.gcda
+fuckyou
