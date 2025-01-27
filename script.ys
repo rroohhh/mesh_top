@@ -2,17 +2,18 @@
 plugin -i /data/projects/ghdl-yosys-plugin/ghdl.so
 # plugin -i /home/robin/.nix-profile/share/yosys/plugins/systemverilog.so
 
-!python -m router.autowrap 'router.memory_mapped_router.MemoryMappedRouter()' > gen/memory_mapped_router.sv
 !python -m router.export_config sv 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.sv
 !python -m router.export_config vhdl 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.vhdl
 !python -m router.export_config cpp 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.cpp
-!python -m router.gen_types 'router.memory_mapped_router.Flit' > gen/flit.cpp
-!python -m router.gen_translators 'router.memory_mapped_router.Flit' > gen/translators.py
+!python -m router.autowrap 'router.memory_mapped_router.MemoryMappedRouter()' > gen/memory_mapped_router.sv
 
 connect_rpc -exec python /data/projects/amaranth/amaranth-rpc yosys router.memory_mapped_router.MemoryMappedRouter
 
 !python gen_src_list.py yosys srclist > /tmp/srclist.ys
 script /tmp/srclist.ys
+
+!python -m router.gen_types 'router.memory_mapped_router.Flit' > gen/flit.cpp
+!python -m router.gen_translators 'router.memory_mapped_router.Flit' > gen/translators.py
 
 hierarchy -top top
 
@@ -28,10 +29,12 @@ cd
 design -push-copy
 flatten
 proc
+
 splitnets -driver; clean -purge; splitnets -driver; clean -purge
 
 # comb feedback on ports is just shit
 #shell
+#show i:* %coe* o:* %cie* %i
 select -assert-none i:* %coe* o:* %cie* %i
 design -pop
 

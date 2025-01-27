@@ -148,7 +148,7 @@ module top(
 		.west_out(out[WEST].master)
 	);
 
-	for (genvar port_idx = 0; port_idx < LOCAL; port_idx++) begin
+	for (genvar port_idx = 0; port_idx < LOCAL; port_idx++) begin : genblk_ports
 	// for (genvar port_idx = 0; port_idx < LOCAL; port_idx++) begin
 		// TODO(robin):	extract this into a module <-> arq packing / unpacking
 		flit rx_unpacked_flit;
@@ -157,13 +157,14 @@ module top(
 		assign rx_flit_tag = rx_unpacked_flit.tag;
 
 		wire tx_idx;
+		wire tx_nack;
 		wire [fatmeshy_pkg::LINK_WORD_SIZE - 1: 0] tx_data;
 		flit tx_packed_flit, tx_packed_flit_tag_fixed;
 
 		assign tx_packed_flit = tx_data[fatmeshy_pkg::SEQ_WIDTH +: $bits(flit)];
 
 		assign tx_packed_flit_tag_fixed.data = tx_packed_flit.data;
-		assign tx_packed_flit_tag_fixed.tag = (tx_idx == 1) ? ARQ : tx_packed_flit.tag;
+		assign tx_packed_flit_tag_fixed.tag = (tx_idx == 1) ? (tx_nack ? ARQ_NACK : ARQ_ACK) : tx_packed_flit.tag;
 
 
 		assign tx_link_data[port_idx][fatmeshy_pkg::SEQ_WIDTH +: $bits(flit)] = tx_packed_flit_tag_fixed;
@@ -189,11 +190,14 @@ module top(
 			// to link
 			.rx_valid(rx_link_valid[port_idx]),
 			.rx_data(rx_link_data[port_idx]),
-			.rx_idx(rx_unpacked_flit.tag == ARQ),
+			.rx_idx((rx_unpacked_flit.tag == ARQ_ACK) || (rx_unpacked_flit.tag == ARQ_NACK)),
+			.rx_nack(rx_unpacked_flit.tag == ARQ_NACK),
 
 			.tx_idx,
 			.tx_valid(tx_link_valid[port_idx]),
+			.tx_nack,
 			.tx_data,
+
 			.tx_accept(tx_accept[port_idx]),
 			.tx_prio(tx_prio[port_idx]),
 			.tx_reject(tx_reject[port_idx])

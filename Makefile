@@ -2,7 +2,7 @@
 # CPLUS_INCLUDE_PATH = ~/.guix-home/profile/include/c++/v1:~/.guix-home/profile/include/
 #CPATH = /nix/store/zrs0wdqgcwr8jimk73c9gz29y5amxlsd-libcxx-19.1.0-dev/include/c++/v1
 
-CXXFLAGS=-I/data/projects/yosys/backends/cxxrtl/runtime/ -Itracy/public -Igen -std=c++23 -pthread # -ggdb  -O3 -march=native -mtune=native
+CXXFLAGS=-isystem /data/projects/yosys/backends/cxxrtl/runtime/ -Itracy/public -Igen -std=c++23 -pthread # -ggdb  -O3 -march=native -mtune=native
 # FLAGS += -ggdb -fsanitize=address
 # -O3
 # -fprofile-generate
