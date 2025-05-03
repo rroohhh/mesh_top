@@ -7,6 +7,7 @@ typedef uint16_t payload_t;
 // generates traffic and can verify it
 class TrafficVerification
 {
+	uint16_t vc;
 	routing_target self;
 	std::map<routing_target, payload_t> send_state;
 	std::map<routing_target, payload_t> receive_state;
@@ -28,12 +29,14 @@ class TrafficVerification
 	{
 		uint16_t a_int = target.val().get<uint16_t>();
 		uint16_t b_int = self.val().get<uint16_t>();
-		return a_int << 4 ^ b_int;
+		return (a_int << 4 ^ b_int) << 4 ^ vc;
 	}
 
 public:
-	TrafficVerification(routing_target self) : self(self) {}
+	TrafficVerification(uint16_t vc, routing_target self) : vc(vc), self(self) {}
 
+	// TODO(robin): at the moment, we do not support crossing from one vc to the other
+	// so we do not need to provide the sender vc here
 	bool receive_from(routing_target sender, payload_t payload)
 	{
 		auto state = receive_state.find(sender);
@@ -126,7 +129,7 @@ public:
 	TraceFPGABandwidth(const NodeInfo& node_info, const Params& params) :
 	    i(node_info), params(params), is_fpga(i.y == 0),
 		traffic_gen(([&]<size_t... Idx>(std::index_sequence<Idx...>){
-			return std::array{TrafficVerification{{.vc{Idx}, .target{.x{i.x}, .y{i.y}}}}...};
+			return std::array{TrafficVerification{Idx, {.target{.x{i.x}, .y{i.y}}}}...};
 		})(std::make_index_sequence<N_VC>()))
 	{
 
@@ -161,7 +164,7 @@ public:
 						},
 						decoded);
 					auto timestamp = payload >> 25;
-					bool src_vc = (payload >> 24) & 0x1;
+					// bool src_vc = (payload >> 24) & 0x1;
 					u8 x = (payload >> 20) & 0xF;
 					u8 y = (payload >> 16) & 0xF;
 					payload = payload & 0xFFFF;
@@ -172,11 +175,10 @@ public:
 
 					// std::println("[{}, {}, {}]@{: 6}: got [{}, {}, {}]@{: 6} {:#06x}", i.x, i.y, vc, i.timestamp, x, y, src_vc, timestamp, payload);
 
-					if (not traffic_gen[vc].receive_from({.vc{src_vc}, .target{.x{x}, .y{y}}}, payload)) {
+					if (not traffic_gen[vc].receive_from({.target{.x{x}, .y{y}}}, payload)) {
 						std::println("mismatch");
 						return true;
 					}
-					// std::println("{:#16x}", payload);
 				}
 			}
 		} else {
@@ -184,8 +186,8 @@ public:
 			to_send = i.timestamp * params.p;
 			if ((sent < to_send) && flits_to_send == 0) {
 				flits_to_send = params.packet_len;
-				// src_vc = (src_vc + 1) % N_VC;
-				src_vc = 1;
+				src_vc = (src_vc + 1) % N_VC;
+				// src_vc = 0;
 			}
 			// force valid here to zero, because shit is fucked otherwise
 			for (int vc = 0; vc < N_VC; vc++) {
@@ -195,7 +197,7 @@ public:
 			bool target_vc = src_vc;
 
 			/* ^= closest fpga */
-			routing_target target{.vc{target_vc}, .target{.x{i.x}, .y{0}}};
+			routing_target target{.target{.x{i.x}, .y{0}}};
 
 			// NOTE(robin): we set valid, but change the payload. This is technically illegal, but
 			// it its fine^TM
