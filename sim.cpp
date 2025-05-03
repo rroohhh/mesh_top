@@ -7,9 +7,9 @@ typedef uint16_t payload_t;
 // generates traffic and can verify it
 class TrafficVerification
 {
-	coordinate self;
-	std::map<coordinate, payload_t> send_state;
-	std::map<coordinate, payload_t> receive_state;
+	routing_target self;
+	std::map<routing_target, payload_t> send_state;
+	std::map<routing_target, payload_t> receive_state;
 
 	payload_t next_state(payload_t this_state)
 	{
@@ -24,19 +24,17 @@ class TrafficVerification
 	//     return lfsr;
 	// }
 
-	payload_t seed_payload(coordinate target)
+	payload_t seed_payload(routing_target target)
 	{
-		value<16> a = target;
-		value<16> b = self;
-		uint16_t a_int = a.get<uint16_t>();
-		uint16_t b_int = b.get<uint16_t>();
+		uint16_t a_int = target.val().get<uint16_t>();
+		uint16_t b_int = self.val().get<uint16_t>();
 		return a_int << 4 ^ b_int;
 	}
 
 public:
-	TrafficVerification(coordinate self) : self(self) {}
+	TrafficVerification(routing_target self) : self(self) {}
 
-	bool receive_from(coordinate sender, payload_t payload)
+	bool receive_from(routing_target sender, payload_t payload)
 	{
 		auto state = receive_state.find(sender);
 		if (state == receive_state.end()) {
@@ -50,18 +48,17 @@ public:
 		};
 	}
 
-	payload_t send_to_peek(coordinate target)
+	payload_t send_to_peek(routing_target target)
 	{
 		auto state = send_state.find(target);
 		if (state == send_state.end()) {
 			auto payload = seed_payload(target);
-			send_state.insert({target, payload});
 			return payload;
 		} else {
 			return next_state(state->second);
 		}
 	}
-	payload_t send_to_pop(coordinate target)
+	payload_t send_to_pop(routing_target target)
 	{
 		auto state = send_state.find(target);
 		if (state == send_state.end()) {
@@ -112,9 +109,10 @@ private:
 	uint32_t flits_to_send = 0;
 	uint32_t sent = 0;
 	uint32_t to_send = 0;
+	bool src_vc = 0;
 	bool is_fpga;
 
-	TrafficVerification traffic_gen;
+	std::array<TrafficVerification, N_VC> traffic_gen;
 
 	// unique ptr to have stable address for fst_writer
 	std::unique_ptr<value<32>> flit_latency = std::make_unique<value<32>>();
@@ -126,8 +124,12 @@ private:
 public:
 	// lfsr cannot be started with 0
 	TraceFPGABandwidth(const NodeInfo& node_info, const Params& params) :
-	    i(node_info), params(params), is_fpga(i.y == 0), traffic_gen({.x = i.x, .y = i.y})
+	    i(node_info), params(params), is_fpga(i.y == 0),
+		traffic_gen(([&]<size_t... Idx>(std::index_sequence<Idx...>){
+			return std::array{TrafficVerification{{.vc{Idx}, .target{.x{i.x}, .y{i.y}}}}...};
+		})(std::make_index_sequence<N_VC>()))
 	{
+
 		fstWriterSetComment(i.fst_ctx, node_role_attr({.is_fpga = is_fpga}).c_str());
 		i.fst_writer.add(i.hier_prefix + "flit_latency", *flit_latency, {});
 		i.fst_writer.add(i.hier_prefix + "flits_received", *flits_received, {});
@@ -139,73 +141,93 @@ public:
 	bool step()
 	{
 		if (is_fpga) {
-			// assume infinite FPGA bandwidth
-			i.node.p_out__ready.set(1);
+			bool latency_set = false;
 
-			if (i.node.p_out__valid and i.node.p_out__ready) {
-				flits_received->set(flits_received->get<uint32_t>() + 1);
-				auto decoded = flit::decode(i.node.p_out__flit);
-				uint64_t payload = std::visit(
-				    [](auto v) {
-					    if constexpr (is_value<decltype(v.payload)>::value) {
-						    // TODO(robin): can we replace this hardcoded 64 anytime?
-						    return v.payload.template zcast<64>().template get<uint64_t>();
-					    } else {
-						    return v.payload;
-					    }
-				    },
-				    decoded);
-				auto timestamp = payload >> 24;
-				u8 x = (payload >> 20) & 0xF;
-				u8 y = (payload >> 16) & 0xF;
-				payload = payload & 0xFFFF;
+			for (int vc = 0; vc < N_VC; vc++) {
+				// assume infinite FPGA bandwidth
+				i.payload_out_ready[vc]->set(1);
 
-				flit_latency->set(i.timestamp - timestamp);
-				// std::println("[{}, {}]@{: 6}: got [{}, {}]@{: 6} {:#06x}", i.x, i.y, i.timestamp,
-				// x, y, timestamp, payload);
-				if (not traffic_gen.receive_from(coordinate{.x = x, .y = y}, payload)) {
-					std::println("mismatch");
-					return true;
+				if (*i.payload_out_valid[vc] and *i.payload_out_ready[vc]) {
+					flits_received->set(flits_received->get<uint32_t>() + 1);
+					auto decoded = flit::decode(*i.payload_out[vc]);
+					uint64_t payload = std::visit(
+						[](auto v) {
+							if constexpr (is_value<decltype(v.payload)>::value) {
+								// TODO(robin): can we replace this hardcoded 64 anytime?
+								return v.payload.template zcast<64>().template get<uint64_t>();
+							} else {
+								return v.payload;
+							}
+						},
+						decoded);
+					auto timestamp = payload >> 25;
+					bool src_vc = (payload >> 24) & 0x1;
+					u8 x = (payload >> 20) & 0xF;
+					u8 y = (payload >> 16) & 0xF;
+					payload = payload & 0xFFFF;
+
+					flit_latency->set(i.timestamp - timestamp);
+					assert(latency_set == false);
+					latency_set = true;
+
+					// std::println("[{}, {}, {}]@{: 6}: got [{}, {}, {}]@{: 6} {:#06x}", i.x, i.y, vc, i.timestamp, x, y, src_vc, timestamp, payload);
+
+					if (not traffic_gen[vc].receive_from({.vc{src_vc}, .target{.x{x}, .y{y}}}, payload)) {
+						std::println("mismatch");
+						return true;
+					}
+					// std::println("{:#16x}", payload);
 				}
-				// std::println("{:#16x}", payload);
 			}
 		} else {
 			// non poissonian to emulate constant ADC sampling
 			to_send = i.timestamp * params.p;
 			if ((sent < to_send) && flits_to_send == 0) {
 				flits_to_send = params.packet_len;
+				// src_vc = (src_vc + 1) % N_VC;
+				src_vc = 1;
 			}
+			// force valid here to zero, because shit is fucked otherwise
+			for (int vc = 0; vc < N_VC; vc++) {
+				i.payload_in_valid[vc]->set(0);
+			}
+			// there is no vc routing, just which vc I send from
+			bool target_vc = src_vc;
 
-			coordinate closest_fpga{.x = i.x, .y = 0};
+			/* ^= closest fpga */
+			routing_target target{.vc{target_vc}, .target{.x{i.x}, .y{0}}};
+
 			// NOTE(robin): we set valid, but change the payload. This is technically illegal, but
 			// it its fine^TM
-			uint64_t payload = ((uint64_t) i.timestamp << 24) | ((u32) (i.x & 0xF)) << 20 |
-			                   ((u32) (i.y & 0xF)) << 16 | traffic_gen.send_to_peek(closest_fpga);
+			// uint64_t payload = ((uint64_t) i.timestamp << 25) | ((u32) (src_vc & 0x1)) << 24 | ((u32) (i.x & 0xF)) << 20 |
+			//                    ((u32) (i.y & 0xF)) << 16 | traffic_gen[target_vc].send_to_peek(target);
+			uint64_t payload = traffic_gen[target_vc].send_to_peek(target);
 
 			if (params.packet_len == 1) {
-				i.node.p_in__flit = flit{flit_start_and_end{
-				    .target = closest_fpga,
+				*i.payload_in[src_vc] = flit{flit_start_and_end{
+				    .target = target,
 				    .payload{payload_from_int<flit_start_and_end>(payload)}}};
 			} else {
 				if (flits_to_send == params.packet_len) {
-					i.node.p_in__flit = flit{flit_start{
-					    .target = closest_fpga, .payload{payload_from_int<flit_start>(payload)}}};
+					*i.payload_in[src_vc] = flit{flit_start{
+					    .target = target, .payload{payload_from_int<flit_start>(payload)}}};
 				} else if (flits_to_send > 1) {
-					i.node.p_in__flit = flit{flit_payload{payload_from_int<flit_payload>(payload)}};
+					*i.payload_in[src_vc] = flit{flit_payload{payload_from_int<flit_payload>(payload)}};
 				} else if (flits_to_send == 1) {
-					i.node.p_in__flit = flit{flit_tail{payload_from_int<flit_tail>(payload)}};
+					*i.payload_in[src_vc] = flit{flit_tail{payload_from_int<flit_tail>(payload)}};
 				} else {
-					i.node.p_in__flit = flit{flit_start{}};
+					*i.payload_in[src_vc] = flit{flit_start{}};
 				}
 			}
 
-			i.node.p_in__valid.set(flits_to_send != 0);
+			i.payload_in_valid[src_vc]->set(flits_to_send != 0);
 
-			if (i.node.p_in__ready and i.node.p_in__valid) {
+			if (*i.payload_in_ready[src_vc] and *i.payload_in_valid[src_vc]) {
+				// std::println("[{}, {}, {}]@{: 6}: sending [{}, {}, {}]@{: 6} {:#06x}", i.x, i.y, src_vc, i.timestamp, i.x, 0, target_vc, i.timestamp, traffic_gen[target_vc].send_to_peek(target));
 				flits_sent->set(flits_sent->get<uint32_t>() + 1);
 
 				flits_to_send--;
-				traffic_gen.send_to_pop(closest_fpga);
+				traffic_gen[target_vc].send_to_pop(target);
 
 				if (flits_to_send == 0) {
 					sent++;

@@ -1,29 +1,17 @@
-# plugin -i /home/robin/.nix-profile/share/yosys/plugins/ghdl.so
-plugin -i /data/projects/ghdl-yosys-plugin/ghdl.so
-# plugin -i /home/robin/.nix-profile/share/yosys/plugins/systemverilog.so
+# !python -m router.export_config sv 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.sv
+# !python -m router.export_config vhdl 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.vhdl
+# !python -m router.autowrap 'router.memory_mapped_router.MemoryMappedRouter()' > gen/memory_mapped_router.sv
 
-!python -m router.export_config sv 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.sv
-!python -m router.export_config vhdl 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.vhdl
-!python -m router.export_config cpp 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.cpp
-!python -m router.autowrap 'router.memory_mapped_router.MemoryMappedRouter()' > gen/memory_mapped_router.sv
+!python router/export_config.py cpp 'router.memory_mapped_router.Config' > gen/memory_mapped_router_pkg.cpp
+!python router/gen_types.py 'router.memory_mapped_router.Flit' > gen/flit.cpp
 
-connect_rpc -exec python /data/projects/amaranth/amaranth-rpc yosys router.memory_mapped_router.MemoryMappedRouter
-
-!python gen_src_list.py yosys srclist > /tmp/srclist.ys
-script /tmp/srclist.ys
-
-!python -m router.gen_types 'router.memory_mapped_router.Flit' > gen/flit.cpp
-!python -m router.gen_translators 'router.memory_mapped_router.Flit' > gen/translators.py
+!python router/fatmeshy_router_top.py > gen/top.il
+read_rtlil gen/top.il
 
 hierarchy -top top
 
 setattr -set input_port 1 i:*
 setattr -set output_port 1 o:*
-
-select router.memory_mapped_router.MemoryMappedRouter*
-write_verilog -sv gen/merged.sv
-write_verilog -selected -sv gen/memory_mapped_router_impl.sv
-cd
 
 # do checks on the input and output ports
 design -push-copy
@@ -44,8 +32,8 @@ expose a:debug_item
 
 # split on drivers, this cleans up feedback cycles
 proc
-splitnets -driver; clean -purge; splitnets -driver; clean -purge
+# splitnets -driver; clean -purge; splitnets -driver; clean -purge
 
 #write_verilog /tmp/a.
 #-g2
-write_cxxrtl -g2 -header gen/router_top.cpp
+write_cxxrtl -g4 -header gen/router_top.cpp

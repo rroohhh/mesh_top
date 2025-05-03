@@ -205,25 +205,25 @@ module top(
 	end
 endmodule
 
-module credit_counter(
-	input wire clk, rst,
-	input fatmeshy_pkg::credit_t credit_in,
-	input wire credit_valid,
-	input tx_valid,
-	output tx_accept
-);
-	fatmeshy_pkg::credit_t credit_amount;
-	always_ff @(posedge clk) begin
-		if (rst) begin
-			credit_amount <= 0;
-		end else begin
-			if (credit_valid) begin
-				credit_amount <= credit_in - (tx_accept & tx_valid);
-			end else begin
-				credit_amount <= credit_amount - (tx_accept & tx_valid);
-			end
-		end
-	end
+// module credit_counter(
+// 	input wire clk, rst,
+// 	input fatmeshy_pkg::credit_t credit_in,
+// 	input wire credit_valid,
+// 	input tx_valid,
+// 	output tx_accept
+// );
+// 	fatmeshy_pkg::credit_t credit_amount;
+// 	always_ff @(posedge clk) begin
+// 		if (rst) begin
+// 			credit_amount <= 0;
+// 		end else begin
+// 			if (credit_valid) begin
+// 				credit_amount <= credit_in - (tx_accept & tx_valid);
+// 			end else begin
+// 				credit_amount <= credit_amount - (tx_accept & tx_valid);
+// 			end
+// 		end
+// 	end
 
-	assign tx_accept = (credit_amount > 0) & tx_valid;
-endmodule // credit_counter
+// 	assign tx_accept = (credit_amount > 0) & tx_valid;
+// endmodule // credit_counter

@@ -11,6 +11,8 @@
 #include <vector>
 #include <tracy/Tracy.hpp>
 
+using memory_mapped_router_config::N_VC;
+
 struct bar_t
 {
 	unsigned const count;
@@ -75,8 +77,8 @@ struct std::formatter<value<bits>, char> : std::formatter<unsigned int>
 #include "flit.cpp"
 #include "router_top.h"
 
-typedef decltype(cxxrtl_design::p_top().p_rx__link__data__north) LinkWord;
-typedef decltype(cxxrtl_design::p_top().p_rx__link__valid__north) LinkScalar;
+typedef decltype(cxxrtl_design::p_top().p_link__n__o____payload) LinkWord;
+typedef decltype(cxxrtl_design::p_top().p_link__n__o____valid) LinkScalar;
 
 uint64_t splitmix64(uint64_t& x)
 {
@@ -173,7 +175,7 @@ class FixedErrorModel
 public:
 	using Params = FixedErrorModelParams;
 
-	FixedErrorModel(uint64_t seed, uint8_t x, uint8_t y, LinkDirection dir, uint8_t /* link_bits */, Params params) : rng(seed), params(params), x(x), y(y), dir(dir)
+	FixedErrorModel(uint64_t seed, uint8_t x, uint8_t y, LinkDirection dir, uint8_t /* link_bits */, Params params) : rng(seed), params(params), x(x), y(y), dir(dir), valid_count(0)
 	{
 	}
 
@@ -225,18 +227,17 @@ class LinkConnection
 {
 	std::vector<LinkWord> words;
 	std::vector<LinkScalar> valids;
+	std::vector<LinkScalar> is_errors;
 
 	LinkWord gearbox_data[2];
 
 	LinkWord& sender_data;
-	LinkWord& receiver_data;
-
 	LinkScalar& sender_valid;
-	LinkScalar& receiver_valid;
+	LinkScalar& sender_ready;
 
-	LinkScalar& sender_accept;
-	LinkScalar& sender_reject;
-	LinkScalar& sender_prio;
+	LinkWord& receiver_data;
+	LinkScalar& receiver_valid;
+	LinkScalar& receiver_input_error;
 
 	unsigned reader, writer;
 
@@ -267,25 +268,24 @@ public:
 	    ErrorModel::Params error_params,
 	    LinkWord& sender_data,
 	    LinkScalar& sender_valid,
-	    LinkScalar& sender_accept,
-	    LinkScalar& sender_reject,
-	    LinkScalar& sender_prio,
+	    LinkScalar& sender_ready,
 	    LinkWord& receiver_data,
 	    LinkScalar& receiver_valid,
+	    LinkScalar& receiver_input_error,
 	    unsigned delay) :
 	    sender_data(sender_data),
-	    receiver_data(receiver_data),
 	    sender_valid(sender_valid),
+	    sender_ready(sender_ready),
+	    receiver_data(receiver_data),
 	    receiver_valid(receiver_valid),
-	    sender_accept(sender_accept),
-	    sender_reject(sender_reject),
-	    sender_prio(sender_prio),
+	    receiver_input_error(receiver_input_error),
 	    rng(rng_seed),
 	    event_traffic_model(rng(), event_traffic_params),
 	    error_model(rng(), x, y, dir, memory_mapped_router_config::MUX_COUNT * memory_mapped_router_config::LINK_BITS, error_params)
 	{
 		words = std::vector<LinkWord>(delay);
 		valids = std::vector<LinkScalar>(delay);
+		is_errors = std::vector<LinkScalar>(delay);
 
 		reader = 0;
 		writer = delay - 1;
@@ -302,7 +302,8 @@ public:
 		// MUX_COUNT we would underutilize the link because we only have one link word to send so
 		// try to always have link_words_to_send >= MUX_COUNT
 		bool accept = link_words_to_send < MUX_COUNT - 1;
-		sender_accept.set(accept);
+		sender_ready.set(accept);
+
 		// while (!)
 		if (sender_valid and accept) {
 			if (link_words_to_send != 0) {
@@ -347,9 +348,11 @@ public:
 			words[writer] = {};
 			valids[writer] = {};
 		}
+		is_errors[writer] = value<1>(error);
 
 		receiver_data = words[reader];
 		receiver_valid = valids[reader];
+		receiver_input_error = is_errors[reader];
 
 		reader = (reader + 1) % words.size();
 		writer = (writer + 1) % words.size();
@@ -360,9 +363,20 @@ public:
 	}
 };
 
+typedef decltype(cxxrtl_design::p_top().p_local__out____0____payload) local_payload;
+
 struct NodeInfo
 {
 	cxxrtl_design::p_top& node;
+
+	local_payload * payload_in[memory_mapped_router_config::N_VC];
+	value<1> * payload_in_valid[memory_mapped_router_config::N_VC];
+	value<1> * payload_in_ready[memory_mapped_router_config::N_VC];
+
+	local_payload * payload_out[memory_mapped_router_config::N_VC];
+	value<1> * payload_out_valid[memory_mapped_router_config::N_VC];
+	value<1> * payload_out_ready[memory_mapped_router_config::N_VC];
+
 	// SAFETY: only valid to use in constructor atm
 	cxxrtl::fstCtx fst_ctx;
 	cxxrtl::fst_writer& fst_writer;
@@ -370,6 +384,33 @@ struct NodeInfo
 	uint64_t& timestamp;
 	u8 x, y;
 	u8 size_x, size_y;
+
+	NodeInfo(
+			 cxxrtl_design::p_top & node,
+			 cxxrtl::fstCtx fst_ctx,
+			 cxxrtl::fst_writer & fst_writer,
+			 std::string hier_prefix,
+			 uint64_t & timestamp,
+			 u8 x, u8 y,
+			 u8 size_x, u8 size_y
+			 ) :
+		node(node),
+		payload_in{&node.p_local__in____0____payload, &node.p_local__in____1____payload},
+		payload_in_valid{&node.p_local__in____0____valid, &node.p_local__in____1____valid},
+		payload_in_ready{&node.p_local__in____0____ready, &node.p_local__in____1____ready},
+		payload_out{&node.p_local__out____0____payload, &node.p_local__out____1____payload},
+		payload_out_valid{&node.p_local__out____0____valid, &node.p_local__out____1____valid},
+		payload_out_ready{&node.p_local__out____0____ready, &node.p_local__out____1____ready},
+		fst_ctx(fst_ctx),
+		fst_writer(fst_writer),
+		hier_prefix(hier_prefix),
+		timestamp(timestamp),
+		x(x), y(y),
+		size_x(size_x), size_y(size_y)
+	{
+		// TODO(robin): figure out how to make this more generic...
+		static_assert(memory_mapped_router_config::N_VC == 2);
+	}
 };
 
 template <class T>
@@ -457,54 +498,55 @@ class Mesh
 						        (u8) height, (u8) width},
 						    node_params);
 
-						node.d.p_route__computer__position = coordinate{.x = x, .y = y};
+						node.d.p_cfg____route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+
 						if (x > 0) {
 							links.emplace_back(
 							    LinkDirection::West, x, y, prefix + "west", fst_writer,
 							    splitmix64(node.rng_seed), event_model_params, error_params,
-							    nodes[x * width + y].d.p_tx__link__data__west,
-							    nodes[x * width + y].d.p_tx__link__valid__west,
-							    nodes[x * width + y].d.p_tx__accept__west,
-							    nodes[x * width + y].d.p_tx__reject__west,
-							    nodes[x * width + y].d.p_tx__prio__west,
-							    nodes[(x - 1) * width + y].d.p_rx__link__data__east,
-							    nodes[(x - 1) * width + y].d.p_rx__link__valid__east, link_delay);
+							    nodes[x * width + y].d.p_link__w__o____payload,
+							    nodes[x * width + y].d.p_link__w__o____valid,
+							    nodes[x * width + y].d.p_link__w__o____ready,
+							    nodes[(x - 1) * width + y].d.p_link__e__i____p,
+							    nodes[(x - 1) * width + y].d.p_link__e__i____valid,
+							    nodes[(x - 1) * width + y].d.p_link__e__i____input__error,
+								link_delay);
 						}
 						if (x < (height - 1)) {
 							links.emplace_back(
 							    LinkDirection::East, x, y, prefix + "east", fst_writer,
 							    splitmix64(node.rng_seed), event_model_params, error_params,
-							    nodes[x * width + y].d.p_tx__link__data__east,
-							    nodes[x * width + y].d.p_tx__link__valid__east,
-							    nodes[x * width + y].d.p_tx__accept__east,
-							    nodes[x * width + y].d.p_tx__reject__east,
-							    nodes[x * width + y].d.p_tx__prio__east,
-							    nodes[(x + 1) * width + y].d.p_rx__link__data__west,
-							    nodes[(x + 1) * width + y].d.p_rx__link__valid__west, link_delay);
+							    nodes[x * width + y].d.p_link__e__o____payload,
+							    nodes[x * width + y].d.p_link__e__o____valid,
+							    nodes[x * width + y].d.p_link__e__o____ready,
+							    nodes[(x + 1) * width + y].d.p_link__w__i____p,
+							    nodes[(x + 1) * width + y].d.p_link__w__i____valid,
+							    nodes[(x + 1) * width + y].d.p_link__w__i____input__error,
+								link_delay);
 						}
 						if (y > 0) {
 							links.emplace_back(
 							    LinkDirection::North, x, y, prefix + "north", fst_writer,
 							    splitmix64(node.rng_seed), event_model_params, error_params,
-							    nodes[x * width + y].d.p_tx__link__data__north,
-							    nodes[x * width + y].d.p_tx__link__valid__north,
-							    nodes[x * width + y].d.p_tx__accept__north,
-							    nodes[x * width + y].d.p_tx__reject__north,
-							    nodes[x * width + y].d.p_tx__prio__north,
-							    nodes[x * width + y - 1].d.p_rx__link__data__south,
-							    nodes[x * width + y - 1].d.p_rx__link__valid__south, link_delay);
+							    nodes[x * width + y].d.p_link__n__o____payload,
+							    nodes[x * width + y].d.p_link__n__o____valid,
+							    nodes[x * width + y].d.p_link__n__o____ready,
+							    nodes[x * width + y - 1].d.p_link__s__i____p,
+							    nodes[x * width + y - 1].d.p_link__s__i____valid,
+							    nodes[x * width + y - 1].d.p_link__s__i____input__error,
+								link_delay);
 						}
 						if (y < (width - 1)) {
 							links.emplace_back(
 							    LinkDirection::South, x, y, prefix + "south", fst_writer,
 							    splitmix64(node.rng_seed), event_model_params, error_params,
-							    nodes[x * width + y].d.p_tx__link__data__south,
-							    nodes[x * width + y].d.p_tx__link__valid__south,
-							    nodes[x * width + y].d.p_tx__accept__south,
-							    nodes[x * width + y].d.p_tx__reject__south,
-							    nodes[x * width + y].d.p_tx__prio__south,
-							    nodes[x * width + y + 1].d.p_rx__link__data__north,
-							    nodes[x * width + y + 1].d.p_rx__link__valid__north, link_delay);
+							    nodes[x * width + y].d.p_link__s__o____payload,
+							    nodes[x * width + y].d.p_link__s__o____valid,
+							    nodes[x * width + y].d.p_link__s__o____ready,
+							    nodes[x * width + y + 1].d.p_link__n__i____p,
+							    nodes[x * width + y + 1].d.p_link__n__i____valid,
+							    nodes[x * width + y + 1].d.p_link__n__i____input__error,
+								link_delay);
 						}
 
 						fst_writer.add(
