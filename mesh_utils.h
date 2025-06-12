@@ -1,6 +1,7 @@
 #pragma once
 
 #include <istream>
+#include <print>
 
 #include "../nlohmann/json.hpp"
 using json = nlohmann::json;
@@ -111,6 +112,7 @@ template <class T>
 struct json_formatter {
     constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
     auto format(const T & v, auto & ctx) const {
+      std::println("using json formatter");
       json j = v;
       return std::format_to(ctx.out(), "{}", j.dump());
     }

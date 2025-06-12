@@ -112,6 +112,8 @@ private:
 	uint32_t flits_to_send = 0;
 	uint32_t sent = 0;
 	uint32_t to_send = 0;
+	std::optional<uint64_t> sending_payload;
+
 	bool src_vc = 0;
 	bool is_fpga;
 
@@ -163,11 +165,11 @@ public:
 							}
 						},
 						decoded);
-					auto timestamp = payload >> 25;
+					auto timestamp = payload & 0xFF'FFFF;
 					// bool src_vc = (payload >> 24) & 0x1;
-					u8 x = (payload >> 20) & 0xF;
-					u8 y = (payload >> 16) & 0xF;
-					payload = payload & 0xFFFF;
+					u8 x = (payload >> 24) & 0xF;
+					u8 y = (payload >> 28) & 0xF;
+					payload = (payload >> 32) & 0xFFFF;
 
 					flit_latency->set(i.timestamp - timestamp);
 					assert(latency_set == false);
@@ -198,38 +200,39 @@ public:
 
 			/* ^= closest fpga */
 			routing_target target{.target{.x{i.x}, .y{0}}};
-
-			// NOTE(robin): we set valid, but change the payload. This is technically illegal, but
-			// it its fine^TM
-			// uint64_t payload = ((uint64_t) i.timestamp << 25) | ((u32) (src_vc & 0x1)) << 24 | ((u32) (i.x & 0xF)) << 20 |
-			//                    ((u32) (i.y & 0xF)) << 16 | traffic_gen[target_vc].send_to_peek(target);
-			uint64_t payload = traffic_gen[target_vc].send_to_peek(target);
-
-			if (params.packet_len == 1) {
-				*i.payload_in[src_vc] = flit{flit_start_and_end{
-				    .target = target,
-				    .payload{payload_from_int<flit_start_and_end>(payload)}}};
-			} else {
-				if (flits_to_send == params.packet_len) {
-					*i.payload_in[src_vc] = flit{flit_start{
-					    .target = target, .payload{payload_from_int<flit_start>(payload)}}};
-				} else if (flits_to_send > 1) {
-					*i.payload_in[src_vc] = flit{flit_payload{payload_from_int<flit_payload>(payload)}};
-				} else if (flits_to_send == 1) {
-					*i.payload_in[src_vc] = flit{flit_tail{payload_from_int<flit_tail>(payload)}};
-				} else {
-					*i.payload_in[src_vc] = flit{flit_start{}};
-				}
-			}
+			// uint64_t payload = traffic_gen[target_vc].send_to_peek(target);
 
 			i.payload_in_valid[src_vc]->set(flits_to_send != 0);
+			if (flits_to_send != 0) {
+				if (!sending_payload) {
+					sending_payload = ((uint64_t) (i.timestamp & 0xFF'FFFF)) | ((uint64_t) (i.x & 0xF)) << 24 |
+						((uint64_t) (i.y & 0xF)) << 28 | ((uint64_t) traffic_gen[target_vc].send_to_pop(target)) << 32;
+				}
+				uint64_t payload = *sending_payload;
+				if (params.packet_len == 1) {
+					*i.payload_in[src_vc] = flit{flit_start_and_end{
+						.target = target,
+						.payload{payload_from_int<flit_start_and_end>(payload)}}};
+				} else {
+					if (flits_to_send == params.packet_len) {
+						*i.payload_in[src_vc] = flit{flit_start{
+							.target = target, .payload{payload_from_int<flit_start>(payload)}}};
+					} else if (flits_to_send > 1) {
+						*i.payload_in[src_vc] = flit{flit_payload{payload_from_int<flit_payload>(payload)}};
+					} else if (flits_to_send == 1) {
+						*i.payload_in[src_vc] = flit{flit_tail{payload_from_int<flit_tail>(payload)}};
+					} else {
+						*i.payload_in[src_vc] = flit{flit_start{}};
+					}
+				}
+			}
 
 			if (*i.payload_in_ready[src_vc] and *i.payload_in_valid[src_vc]) {
 				// std::println("[{}, {}, {}]@{: 6}: sending [{}, {}, {}]@{: 6} {:#06x}", i.x, i.y, src_vc, i.timestamp, i.x, 0, target_vc, i.timestamp, traffic_gen[target_vc].send_to_peek(target));
 				flits_sent->set(flits_sent->get<uint32_t>() + 1);
 
 				flits_to_send--;
-				traffic_gen[target_vc].send_to_pop(target);
+				sending_payload = std::nullopt;
 
 				if (flits_to_send == 0) {
 					sent++;

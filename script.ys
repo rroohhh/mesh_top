@@ -22,7 +22,7 @@ splitnets -driver; clean -purge; splitnets -driver; clean -purge
 
 # comb feedback on ports is just shit
 #shell
-#show i:* %coe* o:* %cie* %i
+# show i:* %coe* o:* %cie* %i
 select -assert-none i:* %coe* o:* %cie* %i
 design -pop
 
@@ -30,8 +30,8 @@ design -pop
 flatten
 expose a:debug_item
 
-# split on drivers, this cleans up feedback cycles
-proc
+# split on drivers, this cleans up feedback cycles <-> no longer necessary
+# proc
 # splitnets -driver; clean -purge; splitnets -driver; clean -purge
 
 #write_verilog /tmp/a.
