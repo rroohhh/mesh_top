@@ -498,7 +498,16 @@ class Mesh
 						        (u8) height, (u8) width},
 						    node_params);
 
-						node.d.p_cfg____route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____west__vc__0__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____west__vc__1__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____east__vc__0__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____east__vc__1__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____south__vc__0__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____south__vc__1__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____north__vc__0__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____north__vc__1__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____local__vc__0__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
+						node.d.p_cfg____local__vc__1__route__computer__cfg____position = coordinate{.x{x}, .y{y}};
 
 						if (x > 0) {
 							links.emplace_back(

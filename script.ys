@@ -21,9 +21,9 @@ proc
 splitnets -driver; clean -purge; splitnets -driver; clean -purge
 
 # comb feedback on ports is just shit
-#shell
-# show i:* %coe* o:* %cie* %i
-select -assert-none i:* %coe* o:* %cie* %i
+# shell
+# show -stretch i:* i:cfg_* %d %coe* o:* o:cfg_* %d %cie* %i
+select -assert-none i:* i:cfg_* %d %coe* o:* o:cfg_* %d %cie* %i
 design -pop
 
 # flatten to extract debug items
